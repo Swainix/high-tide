@@ -17,12 +17,10 @@
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-from typing import List, Any
-from gi.repository import Gdk, Adw
-from gi.repository import GLib
-from gi.repository import Gio
-
+import html
 import os
+import re
+import subprocess
 
 from tidalapi.artist import Artist
 from tidalapi.album import Album
@@ -39,14 +37,20 @@ from ..pages import HTPlaylistPage
 from .cache import HTCache
 
 import threading
-import requests
 import uuid
-import re
-import html
-
+import logging
 from gettext import gettext as _
-
 from pathlib import Path
+from typing import Any, List
+
+import requests
+from gi.repository import Adw, Gdk, Gio, GLib
+from tidalapi import Album, Artist, Mix, Playlist, Track
+
+from ..pages import HTAlbumPage, HTArtistPage, HTMixPage, HTPlaylistPage
+from .cache import HTCache
+
+logger = logging.getLogger(__name__)
 
 favourite_mixes: List[Mix] = []
 favourite_tracks: List[Track] = []
@@ -81,6 +85,95 @@ def init() -> None:
     global cache
     session = None
     cache = HTCache(session)
+
+
+def get_alsa_devices() -> List[dict]:
+    """Get ALSA devices"""
+    try:
+        alsa_devices = get_alsa_devices_from_aplay()
+    except (
+        subprocess.CalledProcessError,
+        FileNotFoundError,
+        subprocess.TimeoutExpired,
+    ):
+        alsa_devices = get_alsa_devices_from_proc()
+    return alsa_devices
+
+
+def get_alsa_devices_from_aplay() -> List[dict]:
+    """Get ALSA devices from aplay -l"""
+    result = subprocess.run(["aplay", "-l"], capture_output=True, text=True)
+
+    devices = [
+        {
+            "hw_device": "default",
+            "name": _("Default"),
+        }
+    ]
+    for line in result.stdout.split("\n"):
+        # Example String: card 3: KA13 [FiiO KA13], device 0: USB Audio [USB Audio]
+        match = re.match(
+            r"^card\s+\d+:\s+([^[]+)\s+\[([^\]]+)\],\s+device\s+(\d+):\s+([^[]+)\s+\[([^\]]+)\]",
+            line,
+        )
+        if match:
+            card_short_name = match.group(1).strip()  # "KA13"
+            card_full_name = match.group(2).strip()  # "FiiO KA13"
+            device = int(match.group(3))  # 0
+            device_short_name = match.group(4).strip()  # "USB Audio"
+            device_full_name = match.group(5).strip()  # "USB Audio"
+
+            # Persistent device string
+            hw_string = f"hw:CARD={card_short_name},DEV={device}"
+            devices.append({
+                "hw_device": hw_string,
+                "name": f"{card_full_name} - {device_full_name} ({hw_string})",
+            })
+
+    return devices
+
+
+def get_alsa_devices_from_proc() -> List[dict]:
+    """Get ALSA devices from files in /proc/asound"""
+    cards = {}
+    card_names = {}
+    with open("/proc/asound/cards", "r") as f:
+        for line in f:
+            # Example String:  3 [KA13           ]: USB-Audio - FiiO KA13
+            match = re.match(r"^\s*(\d+)\s+\[([^\]]+)\]\s*:\s*.+?\s-\s(.+)$", line)
+            if match:
+                index = int(match.group(1))
+                shortname = match.group(2).strip()
+                fullname = match.group(3).strip()
+                cards[index] = fullname
+                card_names[index] = shortname
+
+    devices = [
+        {
+            "hw_device": "default",
+            "name": _("Default"),
+        }
+    ]
+    with open("/proc/asound/devices", "r") as f:
+        for line in f:
+            # Example String:  19: [ 3- 0]: digital audio playback
+            match = re.match(
+                r"^\s*\d+:\s+\[\s*(\d+)-\s*(\d+)\]:\s*digital audio playback", line
+            )
+            if match:
+                card, device = int(match.group(1)), int(match.group(2))
+                card_name = cards.get(card, f"Card {card}")
+                short_name = card_names.get(card, f"{card}")
+
+                # Persistent device string
+                hw_string = f"hw:CARD={short_name},DEV={device}"
+
+                devices.append({
+                    "hw_device": hw_string,
+                    "name": f"{card_name} ({hw_string})",
+                })
+
+    return devices
 
 
 def get_artist(artist_id: str) -> Artist:
@@ -190,16 +283,16 @@ def get_favourites() -> None:
         )
         playlist_and_favorite_playlists = user.playlist_and_favorite_playlists()
         user_playlists = user.playlists()
-    except Exception as e:
-        print(e)
+    except Exception:
+        logger.exception("Error while getting Favourites")
 
-    print(f"Favorite Artists: {len(favourite_artists)}")
-    print(f"Favorite Tracks: {len(favourite_tracks)}")
-    print(f"Favorite Albums: {len(favourite_albums)}")
-    print(f"Favorite Playlists: {len(favourite_playlists)}")
-    print(f"Favorite Mixes: {len(favourite_mixes)}")
-    print(f"Playlist and Favorite Playlists: {len(playlist_and_favorite_playlists)}")
-    print(f"User Playlists: {len(user_playlists)}")
+    logger.info(f"Favorite Artists: {len(favourite_artists)}")
+    logger.info(f"Favorite Tracks: {len(favourite_tracks)}")
+    logger.info(f"Favorite Albums: {len(favourite_albums)}")
+    logger.info(f"Favorite Playlists: {len(favourite_playlists)}")
+    logger.info(f"Favorite Mixes: {len(favourite_mixes)}")
+    logger.info(f"Playlist and Favorite Playlists: {len(playlist_and_favorite_playlists)}")
+    logger.info(f"User Playlists: {len(user_playlists)}")
 
 
 def is_favourited(item: Any) -> bool:
@@ -423,7 +516,7 @@ def open_tidal_uri(uri: str) -> None:
             page = HTPlaylistPage(content_id).load()
             navigation_view.push(page)
         case _:
-            print(f"Unsupported content type: {content_type}")
+            logger.warning(f"Unsupported content type: {content_type}")
             return False
 
 
@@ -504,8 +597,8 @@ def get_image_url(item: Any, dimensions: int = 320) -> str | None:
     try:
         picture_url = item.image(dimensions=dimensions)
         response = requests.get(picture_url)
-    except Exception as e:
-        print(e)
+    except Exception:
+        logger.exception("Could not get image")
         return None
     if response.status_code == 200:
         picture_data = response.content
@@ -587,8 +680,8 @@ def get_video_cover_url(item: Any, dimensions: int = 320) -> str | None:
     try:
         video_url = item.video(dimensions=dimensions)
         response = requests.get(video_url)
-    except Exception as e:
-        print(e)
+    except Exception:
+        logger.exception("Could not get video")
         return None
     if response.status_code == 200:
         picture_data = response.content
@@ -705,3 +798,20 @@ def replace_links(text: str) -> str:
     replaced_text = re.sub(pattern, replace, escaped_text)
 
     return replaced_text
+
+def setup_logging():
+    global CACHE_DIR
+
+    log_to_file = os.getenv("LOG_TO_FILE")
+    log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+
+    handlers = []
+    if log_to_file:
+        handlers.append(logging.FileHandler(CACHE_DIR + "/high-tide.log"))
+    handlers.append(logging.StreamHandler())
+
+    logging.basicConfig(
+        level=getattr(logging, log_level, logging.INFO),
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        handlers=handlers,
+    )

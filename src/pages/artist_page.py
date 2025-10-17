@@ -17,14 +17,18 @@
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-from gi.repository import Gtk, GLib
-
-from .page import Page
-from ..lib import utils
-
+import logging
 import threading
-
 from gettext import gettext as _
+from typing import List
+
+from gi.repository import GLib, Gtk
+from tidalapi import Album, Artist, Track
+
+from ..lib import utils
+from .page import Page
+
+logger = logging.getLogger(__name__)
 
 
 class HTArtistPage(Page):
@@ -32,21 +36,56 @@ class HTArtistPage(Page):
 
     __gtype_name__ = "HTArtistPage"
 
+    top_tracks: List[Track] = []
+    albums: List[Album] = []
+    albums_ep_singles = []
+    albums_other = []
+    similar: List[Artist] = []
+    bio: str = ""
+
     def _load_async(self) -> None:
-        self.artist = utils.get_artist(self.id)
+        try:
+            self.artist = utils.get_artist(self.id)
+        except Exception as e:
+            logger.exception(f"Failed to load artist with id {self.id}: {e}")
+            self.artist = None
+            return  # can't continue if artist is missing
 
-        self.top_tracks = self.artist.get_top_tracks(limit=5)
-        self.albums = self.artist.get_albums(limit=10)
-        self.albums_ep_singles = self.artist.get_albums_ep_singles(limit=10)
-        self.albums_other = self.artist.get_albums_other(limit=10)
+        try:
+            self.top_tracks = self.artist.get_top_tracks(limit=5)
+        except Exception as e:
+            logger.warning(f"Failed to load top tracks for {self.artist}: {e}")
+            self.top_tracks = []
 
-        # tidalapi-0.8.5 breaks loading similar and bio of artists apparently
-        # self.similar = self.artist.get_similar()
-        # print('similar')
-        # self.bio = self.artist.get_bio()
-        # print('bio')
-        self.similar = None
-        self.bio = None
+        try:
+            self.albums = self.artist.get_albums(limit=10)
+        except Exception as e:
+            logger.warning(f"Failed to load albums for {self.artist}: {e}")
+            self.albums = []
+
+        try:
+            self.albums_ep_singles = self.artist.get_albums_ep_singles(limit=10)
+        except Exception as e:
+            logger.warning(f"Failed to load EPs/singles for {self.artist}: {e}")
+            self.albums_ep_singles = []
+
+        try:
+            self.albums_other = self.artist.get_albums_other(limit=10)
+        except Exception as e:
+            logger.warning(f"Failed to load other albums for {self.artist}: {e}")
+            self.albums_other = []
+
+        try:
+            self.similar = self.artist.get_similar()
+        except Exception as e:
+            logger.warning(f"Failed to load similar artists for {self.artist}: {e}")
+            self.similar = []
+
+        try:
+            self.bio = self.artist.get_bio()
+        except Exception as e:
+            logger.warning(f"Failed to load bio for {self.artist}: {e}")
+            self.bio = ""
 
     def _load_finish(self) -> None:
         self.set_title(self.artist.name)
@@ -116,7 +155,7 @@ class HTArtistPage(Page):
             GLib.Variant("s", str(self.artist.id))
         )
 
-        if self.bio is None:
+        if self.bio == "":
             return
 
         bio = utils.replace_links(self.bio)
