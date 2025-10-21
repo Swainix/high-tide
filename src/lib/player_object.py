@@ -324,6 +324,12 @@ class PlayerObject(GObject.GObject):
             self.seek(self.seek_after_sink_reload)
             self.seek_after_sink_reload = None
 
+        self.can_go_prev = len(self.played_songs) > 0
+        # Only notify to deactivate
+        if not self.can_go_prev:
+            self.notify("can-go-prev")
+            GLib.timeout_add(2000, self.previous_timer_callback)
+
     def play_this(
         self, thing: Union[Mix, Album, Playlist, List[Track], Track], index: int = 0
     ) -> None:
@@ -345,15 +351,19 @@ class PlayerObject(GObject.GObject):
             return
 
         track: Track = self._tracks_to_play.pop(0)
-        self.tracks_to_play = self._tracks_to_play
-        self.played_songs = []
 
-        if self.shuffle:
-            self._update_shuffle_queue()
+        if not track.available:
+            self.play_this(thing, index+1)
+        else:
+            self.tracks_to_play = self._tracks_to_play
+            self.played_songs = []
 
-        # Will result in play() call later
-        self.playing = True
-        self.play_track(track)
+            if self.shuffle:
+                self._update_shuffle_queue()
+
+            # Will result in play() call later
+            self.playing = True
+            self.play_track(track)
 
     def shuffle_this(
         self, thing: Union[Mix, Album, Playlist, List[Track], Track]
@@ -594,6 +604,11 @@ class PlayerObject(GObject.GObject):
         # if not in the first 2 seconds of the track restart song
         if self.query_position() > 2 * Gst.SECOND:
             self.seek(0)
+            self.can_go_prev = len(self.played_songs) > 0
+            # only notify when can't go to previous
+            if not self.can_go_prev:
+                self.notify("can-go-prev")
+                GLib.timeout_add(2000, self.previous_timer_callback)
             return
 
         if not self.played_songs:
@@ -604,6 +619,11 @@ class PlayerObject(GObject.GObject):
         if self.playing_track:
             self._tracks_to_play.insert(0, self.playing_track)
         self.play_track(track)
+
+    def previous_timer_callback(self):
+        """Send a notify Event after 2s of the song playing"""
+        self.can_go_prev = True
+        self.notify("can-go-prev")
 
     def _update_shuffle_queue(self):
         if self.shuffle:
